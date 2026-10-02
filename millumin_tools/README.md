@@ -10,7 +10,7 @@ Everything runs on your Mac. Millumin itself is Mac-only.
 ## Setup (once)
 
 ```bash
-brew install ffmpeg python          # ffmpeg/ffprobe do the media work
+brew install ffmpeg poppler python  # ffmpeg/ffprobe: video; poppler: renders .ai/.pdf to PNG
 git clone <this repo> && cd learn/millumin_tools
 python3 -m pip install -r requirements.txt   # only needed for the MCP server
 ```
@@ -34,11 +34,11 @@ python3 content_check/check_content.py ~/Desktop/ClientContent_ShowMedia --canva
 |---|---|
 | `--fps 60` | Show frame rate (default 60) |
 | `--canvas WxH` | Output resolution: projector native, or the LED processor map |
-| `--convert` | `auto`, `hap`, `hap_q` (better quality, ~2x size), `hap_alpha`, `prores` (422 HQ), `prores4444` (with alpha) |
+| `--convert` | Converts videos and renders `.ai`/`.pdf` to PNG at canvas width (transparent background). Video targets: `auto`, `hap`, `hap_q` (better quality, ~2x size), `hap_alpha`, `prores` (422 HQ), `prores4444` (with alpha) |
 | `--conform-fps` | Re-time converted clips to `--fps`. 30 fps becomes 60 cleanly; 25/24 fps will still judder, so ask for a re-render |
 | `--fit-canvas` | Scale and pad converted clips to `--canvas` (transparent padding for alpha clips) |
 
-**What it flags:** H.264/H.265 "delivery" codecs, frame rates that don't divide evenly into 60 (judder), 59.94 vs 60, variable frame rate (phone and screen recordings), wrong resolution or aspect ratio, sizes not divisible by 4 (HAP), interlaced or HDR video, phone rotation metadata, alpha channels, PowerPoint/Keynote/PDF decks, HEIC/SVG/GIF, non-48 kHz or compressed audio, fonts, image sequences, and filenames like "copy" or "draft".
+**What it flags:** files Millumin rejects as *"not accessible or not supported"*: Animation / PNG-in-MOV / CineForm / DNxHD codecs (common for `_Alpha.mov` exports from After Effects), Illustrator `.ai` files, and unreadable files such as cloud "online-only" placeholders. It also flags H.264/H.265 "delivery" codecs, frame rates that don't divide evenly into 60 (judder), 59.94 vs 60, variable frame rate (phone and screen recordings), wrong resolution or aspect ratio, sizes not divisible by 4 (HAP), interlaced or HDR video, phone rotation metadata, alpha channels, PowerPoint/Keynote/PDF decks, HEIC/SVG/GIF, non-48 kHz or compressed audio, fonts, image sequences, and filenames like "copy" or "draft".
 
 **Outputs:** `report.md` (includes a list of questions to send the client), `report.csv`, and `cue_sheet.csv` (cue #, column, file, duration, on-end behaviour, notes; fill it in with the client).
 
@@ -82,3 +82,10 @@ Addresses come from the [official Millumin OSC docs](https://github.com/anome/mi
 ```bash
 python3 -m unittest discover millumin_tools/tests -v
 ```
+
+## Fixing "The following files cannot be imported"
+
+| File | Why | Fix |
+|---|---|---|
+| `*_Alpha.mov` | Usually exported with the Animation, PNG or CineForm codec, which macOS no longer plays. Or the file is still an online-only cloud placeholder | `--convert auto` turns it into HAP Alpha. For a placeholder, right-click it in Finder and choose "Make available offline" / "Download Now" first |
+| `*.ai` | Millumin can't import Illustrator files | `--convert` renders them to PNG. If a file isn't PDF-compatible: in Illustrator, File > Export > Export As > PNG, tick "Use Artboards", and set the resolution to match the canvas |

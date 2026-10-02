@@ -28,7 +28,8 @@ from pathlib import Path
 
 VIDEO_EXT = {".mov", ".mp4", ".m4v", ".avi", ".mkv", ".webm", ".mxf", ".mpg", ".mpeg", ".wmv", ".flv", ".3gp"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".psd", ".tga", ".exr", ".webp"}
-PHOTO_CONVERT_EXT = {".heic", ".heif", ".svg", ".ai", ".eps"}
+PHOTO_CONVERT_EXT = {".heic", ".heif", ".svg", ".eps"}
+VECTOR_EXT = {".ai"}  # Illustrator; PDF-compatible .ai files can be rendered to PNG
 AUDIO_EXT = {".wav", ".aif", ".aiff", ".mp3", ".m4a", ".aac", ".flac", ".ogg"}
 DECK_EXT = {".ppt", ".pptx", ".key", ".pdf", ".odp"}
 FONT_EXT = {".ttf", ".otf", ".ttc", ".woff", ".woff2"}
@@ -36,7 +37,10 @@ IGNORE_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
 # Long-GOP / delivery codecs: fine for web, bad for scrubbing and stacking layers.
 DELIVERY_CODECS = {"h264", "hevc", "vp8", "vp9", "av1", "mpeg4", "mpeg2video", "mpeg1video", "wmv3", "flv1", "msmpeg4v3"}
-PLAYBACK_CODECS = {"hap", "prores", "dnxhd", "png", "qtrle", "rawvideo", "hapq", "hapalpha"}
+PLAYBACK_CODECS = {"hap", "prores", "rawvideo"}
+# Codecs macOS/AVFoundation (and so Millumin) often refuses: "not accessible or not supported".
+UNSUPPORTED_CODECS = {"qtrle": "Animation", "png": "PNG-in-MOV", "cfhd": "GoPro CineForm",
+                      "dnxhd": "DNxHD/DNxHR", "vp6f": "VP6", "rawvideo": "Uncompressed"}
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
 
 ERROR, WARN, INFO = "ERROR", "WARN", "INFO"
@@ -115,6 +119,8 @@ def kind_of(path: Path) -> str:
         return "video"
     if ext in IMAGE_EXT:
         return "image"
+    if ext in VECTOR_EXT:
+        return "vector"
     if ext in PHOTO_CONVERT_EXT:
         return "image-convert"
     if ext in AUDIO_EXT:
@@ -167,6 +173,10 @@ def check_video(item: Item, info: dict, show_fps: float, canvas) -> None:
     a = next((s for s in streams if s.get("codec_type") == "audio"), None)
     fmt = info.get("format", {})
     item.duration = float(fmt.get("duration") or 0)
+    if not info:
+        item.flag(ERROR, "Can't read file: still downloading / cloud 'online-only' placeholder (Dropbox, Google Drive, iCloud), "
+                         "or corrupt. Make it available offline or copy it to a local drive, then re-check")
+        return
     if not v:
         item.flag(ERROR, "No video stream found (corrupt or audio-only?)")
         return
@@ -183,8 +193,13 @@ def check_video(item: Item, info: dict, show_fps: float, canvas) -> None:
     item.alpha = has_alpha(v)
 
     base = v.get("codec_name", "")
+    if base == "hevc" and item.alpha:
+        item.flag(WARN, "HEVC with alpha: transparency is unreliable in Millumin -> convert to HAP Alpha / ProRes 4444")
     if base in DELIVERY_CODECS:
         item.flag(WARN, f"{base.upper()} is a delivery codec: stutters when scrubbing/stacking layers -> transcode to HAP or ProRes")
+    elif base in UNSUPPORTED_CODECS:
+        item.flag(ERROR, f"{UNSUPPORTED_CODECS[base]} codec: Millumin will likely say 'not supported' -> "
+                         f"convert to {'HAP Alpha / ProRes 4444' if item.alpha else 'HAP / ProRes'}")
     elif base not in PLAYBACK_CODECS:
         item.flag(WARN, f"Unusual codec '{base}' -> transcode to HAP or ProRes")
 
@@ -259,6 +274,9 @@ def scan(root: Path, show_fps: float, canvas) -> list[Item]:
             check_video(item, ffprobe(path), show_fps, canvas)
         elif item.kind == "image":
             check_image(item, ffprobe(path), canvas)
+        elif item.kind == "vector":
+            item.flag(ERROR, "Illustrator file: Millumin can't import .ai -> export PNG at canvas size "
+                             "(--convert does it automatically if the file is PDF-compatible)")
         elif item.kind == "image-convert":
             item.flag(WARN, f"{path.suffix.upper()[1:]} isn't reliably supported -> export as PNG")
         elif item.kind == "audio":
@@ -400,10 +418,46 @@ def build_ffmpeg_cmd(it: Item, dest: Path, target: str, show_fps: float, conform
     return cmd
 
 
-def convert(items: list[Item], dest_root: Path, target: str, show_fps: float, conform_fps: bool, canvas, force: bool) -> int:
+def render_vector(it: Item, dest_root: Path, width: int, force: bool) -> bool:
+    """Render an Illustrator (.ai) or PDF file to PNG(s) with poppler's pdftocairo."""
+    if not shutil.which("pdftocairo"):
+        print(f"skip   {it.rel} (needs pdftocairo: brew install poppler)")
+        return False
+    out_dir = (dest_root / it.rel).parent
+    stem = Path(it.rel).stem
+    if (out_dir / f"{stem}.png").exists() and not force:
+        print(f"skip   {it.rel} (exists; use --force)")
+        return True
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"render {it.rel} -> PNG ({width}px wide, transparent background)")
+    res = subprocess.run(["pdftocairo", "-png", "-transp", "-scale-to-x", str(width), "-scale-to-y", "-1",
+                          str(it.path), str(out_dir / stem)], capture_output=True, text=True)
+    pages = sorted(out_dir.glob(f"{glob_escape(stem)}-[0-9]*.png"))
+    if res.returncode != 0 or not pages:
+        print("  FAILED: not PDF-compatible. In Illustrator: File > Export > Export As > PNG "
+              "(Use Artboards), or re-save with 'Create PDF Compatible File' ticked")
+        return False
+    if len(pages) == 1:
+        pages[0].replace(out_dir / f"{stem}.png")
+    return True
+
+
+def glob_escape(s: str) -> str:
+    return re.sub(r"([\[\]*?])", r"[\1]", s)
+
+
+def convert(items: list[Item], dest_root: Path, target: str, show_fps: float, conform_fps: bool, canvas, force: bool,
+            image_width: int = 1920) -> int:
     failures = 0
     for it in items:
+        if it.kind == "vector" or it.path.suffix.lower() == ".pdf":
+            failures += not render_vector(it, dest_root, image_width, force)
+            continue
         if it.kind != "video":
+            continue
+        if not it.codec:
+            failures += 1
+            print(f"skip   {it.rel} (unreadable: make it available offline / re-download it first)")
             continue
         dest = dest_root / Path(it.rel).with_suffix(".mov")
         if dest.exists() and not force:
@@ -464,7 +518,8 @@ def main(argv=None) -> int:
     if args.convert:
         dest = (args.dest or root.with_name(root.name + "_ShowMedia")).expanduser()
         failures = convert(items, dest, args.convert, args.fps, args.conform_fps,
-                           args.canvas if args.fit_canvas else None, args.force)
+                           args.canvas if args.fit_canvas else None, args.force,
+                           image_width=args.canvas[0] if args.canvas else 1920)
         print(f"\nConverted media: {dest}" + (f"  ({failures} failed)" if failures else ""))
         if failures:
             return 1

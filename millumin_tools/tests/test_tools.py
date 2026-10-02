@@ -63,6 +63,21 @@ class McpServerTests(unittest.TestCase):
             s.close()
 
 
+def minimal_pdf() -> bytes:
+    """A one-page 16:9 PDF, which is what a PDF-compatible .ai file contains."""
+    content = b"1 0 0 rg 100 100 400 200 re f"
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 960 540] /Contents 4 0 R >>",
+            b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream"]
+    out, offsets = b"%PDF-1.4\n", []
+    for i, obj in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + obj + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1) + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    return out + b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+
+
 @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
 class CheckerTests(unittest.TestCase):
     def setUp(self):
@@ -85,6 +100,24 @@ class CheckerTests(unittest.TestCase):
         self.assertIn("delivery codec", msgs)
         self.assertEqual(items["clip60.mov"].worst, "OK")
         self.assertEqual(items["deck.key"].worst, "ERROR")
+
+    def test_unsupported_alpha_and_illustrator(self):
+        self.make("anim_Alpha.mov", "color=c=red@0.5:s=640x360:r=60,format=rgba", "-c:v", "qtrle")
+        (self.dir / "broken.mov").touch()
+        (self.dir / "screen.ai").write_bytes(minimal_pdf())
+        items = self.by_name(check_content.scan(self.dir, 60, None))
+        self.assertEqual(items["anim_Alpha.mov"].worst, "ERROR")
+        self.assertTrue(items["anim_Alpha.mov"].alpha)
+        self.assertIn("cloud", items["broken.mov"].issues[-1][1])
+        self.assertEqual((items["screen.ai"].kind, items["screen.ai"].worst), ("vector", "ERROR"))
+
+        out = self.dir / "out"
+        failures = check_content.convert(list(items.values()), out, "auto", 60, False, None, False)
+        converted = self.by_name(check_content.scan(out, 60, None))
+        self.assertEqual(converted["anim_Alpha.mov"].codec, "hap_alpha")
+        if shutil.which("pdftocairo"):
+            self.assertEqual(failures, 1)  # only broken.mov
+            self.assertEqual((converted["screen.png"].width, converted["screen.png"].height), (1920, 1080))
 
     def test_convert_to_hap(self):
         self.make("in.mp4", "testsrc2=s=642x360:r=30", "-c:v", "libx264")
